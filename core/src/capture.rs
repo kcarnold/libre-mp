@@ -228,6 +228,8 @@ impl FrameGrabber for ScrapGrabber {
         // scrap says wouldblock till compositor has frame
         for _ in 0..100 {
             match self.capturer.frame() {
+                // a frame smaller than the size we asked for would be read out of bounds
+                Ok(frame) if frame.len() < (self.w * self.h * 4) as usize => return None,
                 Ok(frame) => {
                     #[allow(unused_mut)]
                     let mut rgb = resize_bgra_to_rgb(&frame, self.w, self.h, STREAM_W, STREAM_H);
@@ -351,6 +353,10 @@ pub fn open_display(spec: DisplaySpec) -> Result<Box<dyn FrameGrabber>, String> 
     if !want.active {
         return Err(format!("display {} is asleep or mirrored, so it can't be cast", want.id));
     }
+    // a new display can be online before its mode is set; a 0x0 capture repeats one pixel
+    if want.width == 0 || want.height == 0 {
+        return Err(format!("display {} has no size yet; try again", want.id));
+    }
     let display = scrap::Display::all()
         .ok()
         .and_then(|all| all.into_iter().nth(idx))
@@ -388,15 +394,15 @@ impl FrameGrabber for VirtualDisplayGrabber {
 #[cfg(target_os = "macos")]
 pub fn open_virtual_display() -> Result<Box<dyn FrameGrabber>, String> {
     let display = crate::mac_virtual_display::VirtualDisplay::new(STREAM_W, STREAM_H)?;
-    // takes a moment to come online
-    for _ in 0..40 {
-        if list_displays().iter().any(|d| d.id == display.id) {
+    // takes a moment to come online, and a moment more to get its mode
+    for _ in 0..100 {
+        if list_displays().iter().any(|d| d.id == display.id && d.width == STREAM_W && d.height == STREAM_H) {
             let grabber = open_display(DisplaySpec::Id(display.id))?;
             return Ok(Box::new(VirtualDisplayGrabber { grabber, _display: display }));
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
-    Err(format!("virtual display {} never came online", display.id))
+    Err(format!("virtual display {} never came online at {STREAM_W}x{STREAM_H}", display.id))
 }
 
 #[cfg(not(target_os = "macos"))]
