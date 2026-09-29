@@ -48,8 +48,9 @@ impl VirtualDisplay {
             let display = display.ok_or("macOS refused to create the virtual display")?;
 
             let alloc: Allocated<AnyObject> = msg_send![class("CGVirtualDisplayMode")?, alloc];
-            let mode: Retained<AnyObject> =
+            let mode: Option<Retained<AnyObject>> =
                 msg_send![alloc, initWithWidth: width, height: height, refreshRate: 60.0f64];
+            let mode = mode.ok_or("macOS refused the virtual display's mode")?;
             let settings: Retained<AnyObject> = msg_send![class("CGVirtualDisplaySettings")?, new];
             let _: () = msg_send![&*settings, setHiDPI: 0u32];
             let modes = NSArray::from_retained_slice(&[mode]);

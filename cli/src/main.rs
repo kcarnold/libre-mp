@@ -16,27 +16,42 @@ fn main() {
     let has_flag = |f: &str| args.iter().any(|a| a == f);
     let get_arg = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
 
+    let fail = |msg: &str| -> ! {
+        eprintln!("[-] {msg}");
+        std::process::exit(3);
+    };
+
     if has_flag("--list-displays") {
+        let displays = capture::list_displays();
+        if displays.is_empty() {
+            fail("--list-displays is only supported on macOS so far");
+        }
         eprintln!("{:>10}  size", "id");
-        for d in capture::list_displays() {
+        for d in displays {
             eprintln!("{d}");
         }
         return;
     }
 
-    // --virtual-display: make a 1024x768 desktop just for the projector, cast it, remove it on exit
-    // --display: cast exactly this display. both fail rather than fall back, and open before wi-fi so errors are quick
-    let display_grabber = if has_flag("--virtual-display") {
-        Some(capture::open_virtual_display())
+    // what to cast instead of the default screen; at most one. all fail rather than fall back,
+    // and open before wi-fi so errors are quick
+    let sources = ["--test-pattern", "--virtual-display", "--display"];
+    if sources.iter().filter(|f| has_flag(f)).count() > 1 {
+        fail("use only one of --test-pattern, --virtual-display, --display");
+    }
+    let mut grabber: Option<Box<dyn capture::FrameGrabber>> = if has_flag("--test-pattern") {
+        // color bars instead of screen, rules out capture trouble
+        eprintln!("[*] Casting test pattern instead of the screen");
+        Some(Box::new(capture::TestPatternGrabber::new()))
+    } else if has_flag("--virtual-display") {
+        // a 1024x768 desktop just for the projector, removed on exit
+        Some(capture::open_virtual_display().unwrap_or_else(|e| fail(&e)))
+    } else if has_flag("--display") {
+        let spec = get_arg("--display").unwrap_or_else(|| fail("--display needs a value: an id, WIDTHxHEIGHT, or 'primary'"));
+        Some(spec.parse().and_then(capture::open_display).unwrap_or_else(|e| fail(&e)))
     } else {
-        get_arg("--display").map(|spec| spec.parse().and_then(capture::open_display))
+        None
     };
-    let mut display_grabber = display_grabber.map(|g| {
-        g.unwrap_or_else(|e| {
-            eprintln!("[-] {e}");
-            std::process::exit(3);
-        })
-    });
 
     let (prev_wifi, ssid, password) = if has_flag("--skip-wifi") {
         let ssid = get_arg("--ssid").unwrap_or_default();
@@ -60,14 +75,9 @@ fn main() {
     let r = running.clone();
     ctrlc::set_handler(move || r.store(false, Ordering::Relaxed)).expect("Error setting Ctrl+C handler");
 
-    // --test-pattern: color bars instead of screen, rules out capture trouble
-    let result = if has_flag("--test-pattern") {
-        eprintln!("[*] Casting test pattern instead of the screen");
-        session::run_with(&opts, &mut capture::TestPatternGrabber::new(), &running, &mut |_| {})
-    } else if let Some(g) = display_grabber.as_mut() {
-        session::run_with(&opts, g.as_mut(), &running, &mut |_| {})
-    } else {
-        session::run(&opts, &running, &mut |_| {})
+    let result = match grabber.as_mut() {
+        Some(g) => session::run_with(&opts, g.as_mut(), &running, &mut |_| {}),
+        None => session::run(&opts, &running, &mut |_| {}),
     };
     if let Some(id) = prev_wifi {
         eprintln!("[*] Restoring Wi-Fi...");

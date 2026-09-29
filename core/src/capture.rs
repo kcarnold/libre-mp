@@ -285,6 +285,8 @@ pub struct DisplayInfo {
     pub height: u32,
     pub primary: bool,
     pub builtin: bool,
+    // online but asleep/mirrored displays may never give frames
+    pub active: bool,
 }
 
 impl std::fmt::Display for DisplayInfo {
@@ -295,6 +297,9 @@ impl std::fmt::Display for DisplayInfo {
         }
         if self.builtin {
             write!(f, "  built-in")?;
+        }
+        if !self.active {
+            write!(f, "  inactive")?;
         }
         Ok(())
     }
@@ -312,6 +317,7 @@ pub fn list_displays() -> Vec<DisplayInfo> {
             height: d.height() as u32,
             primary: d.is_primary(),
             builtin: d.is_builtin(),
+            active: d.is_active(),
         })
         .collect()
 }
@@ -342,14 +348,23 @@ pub fn open_display(spec: DisplaySpec) -> Result<Box<dyn FrameGrabber>, String> 
         _ => return Err(format!("{spec:?} matches several displays; pick one by id. Displays:{}", table())),
     };
     let want = displays[idx];
+    if !want.active {
+        return Err(format!("display {} is asleep or mirrored, so it can't be cast", want.id));
+    }
     let display = scrap::Display::all()
         .ok()
         .and_then(|all| all.into_iter().nth(idx))
         .filter(|d| d.width() as u32 == want.width && d.height() as u32 == want.height)
         .ok_or_else(|| "display list changed while opening; try again".to_string())?;
     let capturer = scrap::Capturer::new(display).map_err(|e| format!("can't capture display {}: {e}", want.id))?;
+    let mut grabber = ScrapGrabber { w: capturer.width() as u32, h: capturer.height() as u32, capturer };
+    // a display can open fine yet never send frames; fail now instead of hanging the cast.
+    // each grab waits up to ~200ms
+    if !(0..5).any(|_| grabber.grab().is_some()) {
+        return Err(format!("display {} opened but sent no frames within a second", want.id));
+    }
     eprintln!("[+] Capture: display {} ({}x{})", want.id, want.width, want.height);
-    Ok(Box::new(ScrapGrabber { w: capturer.width() as u32, h: capturer.height() as u32, capturer }))
+    Ok(Box::new(grabber))
 }
 
 // grabber that owns the virtual display it casts; fields drop in order, so the stream stops before the display goes
