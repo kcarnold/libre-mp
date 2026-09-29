@@ -1414,6 +1414,8 @@ dependencies = [
  "image",
  "keyring",
  "libc",
+ "objc2",
+ "objc2-foundation",
  "pipewire",
  "quircs",
  "scrap",

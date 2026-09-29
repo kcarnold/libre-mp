@@ -24,9 +24,15 @@ fn main() {
         return;
     }
 
-    // --display: cast exactly this display, fail rather than fall back. opened before wi-fi so errors are quick
-    let mut display_grabber = get_arg("--display").map(|spec| {
-        spec.parse().and_then(capture::open_display).unwrap_or_else(|e| {
+    // --virtual-display: make a 1024x768 desktop just for the projector, cast it, remove it on exit
+    // --display: cast exactly this display. both fail rather than fall back, and open before wi-fi so errors are quick
+    let display_grabber = if has_flag("--virtual-display") {
+        Some(capture::open_virtual_display())
+    } else {
+        get_arg("--display").map(|spec| spec.parse().and_then(capture::open_display))
+    };
+    let mut display_grabber = display_grabber.map(|g| {
+        g.unwrap_or_else(|e| {
             eprintln!("[-] {e}");
             std::process::exit(3);
         })

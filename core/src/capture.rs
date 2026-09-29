@@ -348,8 +348,45 @@ pub fn open_display(spec: DisplaySpec) -> Result<Box<dyn FrameGrabber>, String> 
         .filter(|d| d.width() as u32 == want.width && d.height() as u32 == want.height)
         .ok_or_else(|| "display list changed while opening; try again".to_string())?;
     let capturer = scrap::Capturer::new(display).map_err(|e| format!("can't capture display {}: {e}", want.id))?;
-    eprintln!("[+] Capture: display {want}");
+    eprintln!("[+] Capture: display {} ({}x{})", want.id, want.width, want.height);
     Ok(Box::new(ScrapGrabber { w: capturer.width() as u32, h: capturer.height() as u32, capturer }))
+}
+
+// grabber that owns the virtual display it casts; fields drop in order, so the stream stops before the display goes
+#[cfg(target_os = "macos")]
+struct VirtualDisplayGrabber {
+    grabber: Box<dyn FrameGrabber>,
+    _display: crate::mac_virtual_display::VirtualDisplay,
+}
+
+#[cfg(target_os = "macos")]
+impl FrameGrabber for VirtualDisplayGrabber {
+    fn grab(&mut self) -> Option<Vec<u8>> {
+        self.grabber.grab()
+    }
+    fn name(&self) -> &'static str {
+        "virtual display (CoreGraphics)"
+    }
+}
+
+// new stream-size display just for the projector, removed when the grabber drops
+#[cfg(target_os = "macos")]
+pub fn open_virtual_display() -> Result<Box<dyn FrameGrabber>, String> {
+    let display = crate::mac_virtual_display::VirtualDisplay::new(STREAM_W, STREAM_H)?;
+    // takes a moment to come online
+    for _ in 0..40 {
+        if list_displays().iter().any(|d| d.id == display.id) {
+            let grabber = open_display(DisplaySpec::Id(display.id))?;
+            return Ok(Box::new(VirtualDisplayGrabber { grabber, _display: display }));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    Err(format!("virtual display {} never came online", display.id))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_virtual_display() -> Result<Box<dyn FrameGrabber>, String> {
+    Err("--virtual-display is only supported on macOS so far".to_string())
 }
 
 #[cfg(not(target_os = "macos"))]

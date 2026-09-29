@@ -30,5 +30,10 @@ zbus = "~5.16.0"
 # XFixes, to draw the mouse pointer into X11 captures (XShm does not include it).
 xcb = { version = "~1.7.0", features = ["xfixes"] }
 
+# Virtual "projector" display via CoreGraphics' private CGVirtualDisplay classes.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "~0.6.4"
+objc2-foundation = { version = "~0.3.2", features = ["NSString", "NSArray", "NSGeometry"] }
+
 [target.'cfg(windows)'.dependencies]
 winapi = { version = "~0.3.9", features = ["winsock2", "ws2def", "mstcpip", "minwindef", "winuser", "wingdi", "errhandlingapi", "winbase", "memoryapi", "libloaderapi", "windef"] }

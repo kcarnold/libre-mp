@@ -7,6 +7,8 @@ pub mod capture;
 pub mod screencast;
 #[cfg(target_os = "linux")]
 pub mod x11_cursor;
+#[cfg(target_os = "macos")]
+pub mod mac_virtual_display;
 pub mod protocol;
 pub mod config;
 pub mod qr;
