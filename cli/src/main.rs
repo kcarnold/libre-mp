@@ -16,6 +16,22 @@ fn main() {
     let has_flag = |f: &str| args.iter().any(|a| a == f);
     let get_arg = |f: &str| args.iter().position(|a| a == f).and_then(|i| args.get(i + 1)).cloned();
 
+    if has_flag("--list-displays") {
+        eprintln!("{:>10}  size", "id");
+        for d in capture::list_displays() {
+            eprintln!("{d}");
+        }
+        return;
+    }
+
+    // --display: cast exactly this display, fail rather than fall back. opened before wi-fi so errors are quick
+    let mut display_grabber = get_arg("--display").map(|spec| {
+        spec.parse().and_then(capture::open_display).unwrap_or_else(|e| {
+            eprintln!("[-] {e}");
+            std::process::exit(3);
+        })
+    });
+
     let (prev_wifi, ssid, password) = if has_flag("--skip-wifi") {
         let ssid = get_arg("--ssid").unwrap_or_default();
         eprintln!("[*] CLI mode: skip-wifi, ssid={ssid}");
@@ -42,6 +58,8 @@ fn main() {
     let result = if has_flag("--test-pattern") {
         eprintln!("[*] Casting test pattern instead of the screen");
         session::run_with(&opts, &mut capture::TestPatternGrabber::new(), &running, &mut |_| {})
+    } else if let Some(g) = display_grabber.as_mut() {
+        session::run_with(&opts, g.as_mut(), &running, &mut |_| {})
     } else {
         session::run(&opts, &running, &mut |_| {})
     };

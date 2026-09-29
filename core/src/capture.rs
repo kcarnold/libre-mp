@@ -250,6 +250,113 @@ impl FrameGrabber for ScrapGrabber {
     }
 }
 
+// ─── explicit display pick (cli --display) ──────────────────────────────────
+
+// which display to cast, from cli
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+pub enum DisplaySpec {
+    Primary,
+    // coregraphics display id
+    Id(u32),
+    // only display with this size
+    Size(u32, u32),
+}
+
+impl std::str::FromStr for DisplaySpec {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        if s == "primary" {
+            return Ok(DisplaySpec::Primary);
+        }
+        if let Some((w, h)) = s.split_once('x') {
+            if let (Ok(w), Ok(h)) = (w.parse(), h.parse()) {
+                return Ok(DisplaySpec::Size(w, h));
+            }
+        }
+        s.parse().map(DisplaySpec::Id)
+            .map_err(|_| format!("bad display '{s}': want an id, WIDTHxHEIGHT, or 'primary'"))
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct DisplayInfo {
+    pub id: u32,
+    pub width: u32,
+    pub height: u32,
+    pub primary: bool,
+    pub builtin: bool,
+}
+
+impl std::fmt::Display for DisplayInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(f, "{:>10}  {}x{}", self.id, self.width, self.height)?;
+        if self.primary {
+            write!(f, "  primary")?;
+        }
+        if self.builtin {
+            write!(f, "  built-in")?;
+        }
+        Ok(())
+    }
+}
+
+// displays in coregraphics online order (same order as scrap::Display::all)
+#[cfg(target_os = "macos")]
+pub fn list_displays() -> Vec<DisplayInfo> {
+    scrap::quartz::Display::online()
+        .unwrap_or_default()
+        .into_iter()
+        .map(|d| DisplayInfo {
+            id: d.id(),
+            width: d.width() as u32,
+            height: d.height() as u32,
+            primary: d.is_primary(),
+            builtin: d.is_builtin(),
+        })
+        .collect()
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn list_displays() -> Vec<DisplayInfo> {
+    Vec::new()
+}
+
+// grabber for exactly the display asked for; err (with display list) if none or ambiguous
+#[cfg(target_os = "macos")]
+pub fn open_display(spec: DisplaySpec) -> Result<Box<dyn FrameGrabber>, String> {
+    let displays = list_displays();
+    let hits: Vec<usize> = (0..displays.len())
+        .filter(|&i| {
+            let d = &displays[i];
+            match spec {
+                DisplaySpec::Primary => d.primary,
+                DisplaySpec::Id(id) => d.id == id,
+                DisplaySpec::Size(w, h) => d.width == w && d.height == h,
+            }
+        })
+        .collect();
+    let table = || displays.iter().map(|d| format!("\n  {d}")).collect::<String>();
+    let idx = match hits[..] {
+        [i] => i,
+        [] => return Err(format!("no display matches {spec:?}. Displays:{}", table())),
+        _ => return Err(format!("{spec:?} matches several displays; pick one by id. Displays:{}", table())),
+    };
+    let want = displays[idx];
+    let display = scrap::Display::all()
+        .ok()
+        .and_then(|all| all.into_iter().nth(idx))
+        .filter(|d| d.width() as u32 == want.width && d.height() as u32 == want.height)
+        .ok_or_else(|| "display list changed while opening; try again".to_string())?;
+    let capturer = scrap::Capturer::new(display).map_err(|e| format!("can't capture display {}: {e}", want.id))?;
+    eprintln!("[+] Capture: display {want}");
+    Ok(Box::new(ScrapGrabber { w: capturer.width() as u32, h: capturer.height() as u32, capturer }))
+}
+
+#[cfg(not(target_os = "macos"))]
+pub fn open_display(_spec: DisplaySpec) -> Result<Box<dyn FrameGrabber>, String> {
+    Err("--display is only supported on macOS so far".to_string())
+}
+
 // windows gdi grabber, cursor in
 #[cfg(windows)]
 pub struct GdiGrabber;
