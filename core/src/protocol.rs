@@ -88,9 +88,12 @@ fn default_gateways() -> Vec<Ipv4Addr> {
     out
 }
 
-// where to look: given ip, then gateways, then epson default
+// where to look: given ip only; else gateways, then epson default
 fn projector_candidates(override_ip: Option<Ipv4Addr>) -> Vec<Ipv4Addr> {
-    let mut all: Vec<Ipv4Addr> = override_ip.into_iter().chain(default_gateways()).collect();
+    if let Some(ip) = override_ip {
+        return vec![ip];
+    }
+    let mut all = default_gateways();
     all.push(DEFAULT_PROJECTOR_IP);
     let mut seen = std::collections::HashSet::new();
     all.retain(|ip| seen.insert(*ip));
