@@ -16,6 +16,9 @@ const TARGET_FPS: u64 = 24;
 const AUDIO_SLICE: Duration = Duration::from_millis(100);
 // whole picture resent this often, so any lost part heals fast
 const FULL_REFRESH: Duration = Duration::from_secs(1);
+// control heartbeat: v9 windows client sends one every 5s; v11 kept at the old 30s, untested faster
+const HEARTBEAT_V9: Duration = Duration::from_secs(5);
+const HEARTBEAT_V11: Duration = Duration::from_secs(30);
 // change detection grid, 16-aligned for 4:2:0 jpeg
 const CELL: usize = 32;
 // biggest tile windows client ever sends
@@ -159,6 +162,7 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
     let my_ip = client.my_ip;
     // v9 projectors use a different control heartbeat and no silent-audio channel
     let use_v9 = protocol::is_v9(client.version);
+    let heartbeat = if use_v9 { HEARTBEAT_V9 } else { HEARTBEAT_V11 };
     let build = |ip, tiles: &[VideoTile], meta| {
         if use_v9 { protocol::build_video_frame_v9(ip, tiles, meta) } else { protocol::build_video_frame(ip, tiles, meta) }
     };
@@ -176,7 +180,7 @@ fn stream(client: &mut protocol::EpsonClient, grabber: &mut dyn FrameGrabber, ru
         if let Err(e) = protocol::drain_auth(&mut client.s_auth, my_ip) {
             return format!("Control channel: {e}");
         }
-        if last_heartbeat.elapsed() > Duration::from_secs(30) {
+        if last_heartbeat.elapsed() > heartbeat {
             let _ = client.s_auth.write_all(&protocol::control_heartbeat(my_ip, use_v9));
             last_heartbeat = Instant::now();
         }
