@@ -21,6 +21,8 @@ const PORT_CONTROL: u16 = 3620;
 const PORT_VIDEO: u16 = 3621;
 // bounded connect: wrong address fail in seconds, not os ~2 min
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+// send that makes no progress this long = dead link; fail so session reconnects instead of hanging minutes
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
 
 // eemp commands seen in windows capture
 const CMD_REGISTER: u32 = 0x0002;
@@ -100,10 +102,11 @@ fn projector_candidates(override_ip: Option<Ipv4Addr>) -> Vec<Ipv4Addr> {
     all
 }
 
-// tcp connect: no nagle, keepalive, bounded
+// tcp connect: no nagle, keepalive, bounded connect and writes
 fn open(ip: Ipv4Addr, port: u16) -> io::Result<TcpStream> {
     let s = TcpStream::connect_timeout(&SocketAddr::from((ip, port)), CONNECT_TIMEOUT)?;
     s.set_nodelay(true)?;
+    s.set_write_timeout(Some(WRITE_TIMEOUT))?;
     enable_tcp_keepalive(&s);
     Ok(s)
 }
@@ -635,9 +638,15 @@ pub fn drain_auth(s_auth: &mut TcpStream, my_ip: Ipv4Addr) -> io::Result<()> {
     Ok(())
 }
 
-// send video frame bytes
+// send video frame bytes; a stalled send says so instead of "resource temporarily unavailable"
 pub fn send_frame(stream: &mut TcpStream, data: &[u8]) -> io::Result<()> {
-    stream.write_all(data)
+    stream.write_all(data).map_err(|e| match e.kind() {
+        io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut => io::Error::new(
+            io::ErrorKind::TimedOut,
+            format!("projector took no video for {}s", WRITE_TIMEOUT.as_secs()),
+        ),
+        _ => e,
+    })
 }
 
 // ─── eprd frame builder ─────────────────────────────────────────────────────
