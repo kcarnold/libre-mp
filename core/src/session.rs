@@ -97,12 +97,14 @@ pub fn run_with(
 ) -> Result<(), CastError> {
     let full_only = opts.full_frames_only || std::env::var_os("LIBREMP_FULL_FRAMES").is_some_and(|v| v == "1");
     let mut failures = 0u32;
+    // after a cast worked, a refusal likely means projector still holds our dropped session; keep trying
+    let mut cast_before = false;
     while running.load(Ordering::Relaxed) {
         on_event(CastEvent::Connecting { attempt: failures + 1 });
         let mut client =
             match protocol::EpsonClient::connect(&opts.password, &opts.ssid, opts.projector_ip, opts.keyword.as_deref()) {
                 Ok(c) => c,
-                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => {
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied && !cast_before => {
                     eprintln!("[-] Connection refused: {e}");
                     return Err(CastError {
                         kind: FailKind::Rejected,
@@ -128,6 +130,7 @@ pub fn run_with(
                 }
             };
         failures = 0;
+        cast_before = true;
         on_event(CastEvent::Casting { projector: client.name.clone() });
         let reason = stream(&mut client, grabber, running, full_only);
         if !running.load(Ordering::Relaxed) {
