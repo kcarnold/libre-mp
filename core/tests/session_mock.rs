@@ -46,55 +46,68 @@ fn wait_cmd(s: &mut TcpStream, cmd: u32) -> bool {
 struct Seen {
     video: Vec<u8>,
     goodbye: bool,
+    // sessions told to start streaming
+    streams: u32,
 }
 
-// serve one session. status 0 = accept login, else refuse
-fn fake_projector(status: u8) -> Arc<Mutex<Seen>> {
+// serve one session per status: 0 = accept login, else refuse. accepted sessions before the last
+// stream a moment then drop the control channel, like a network drop
+fn fake_projector(statuses: &[u8]) -> Arc<Mutex<Seen>> {
     let seen = Arc::new(Mutex::new(Seen::default()));
     let control = TcpListener::bind((LOCAL, 3620)).expect("port 3620 free");
     let video = TcpListener::bind((LOCAL, 3621)).expect("port 3621 free");
+    let statuses = statuses.to_vec();
+    let accepted = statuses.iter().filter(|&&st| st == 0).count();
 
     let s = seen.clone();
     thread::spawn(move || {
-        // registration: name + mac, then close
-        let (mut reg, _) = control.accept().unwrap();
-        wait_cmd(&mut reg, 0x0002);
-        let mut info = vec![1, 0, 0, 0];
-        info.extend_from_slice(&{
-            let mut n = [0u8; 32];
-            n[..NAME.len()].copy_from_slice(NAME);
-            n
-        });
-        info.extend_from_slice(&[0u8; 12]);
-        info.extend_from_slice(&MAC);
-        reg.write_all(&eemp(0x0003, &info)).unwrap();
-        drop(reg);
+        for (i, &status) in statuses.iter().enumerate() {
+            let last = i + 1 == statuses.len();
+            // registration: name + mac, then close
+            let (mut reg, _) = control.accept().unwrap();
+            wait_cmd(&mut reg, 0x0002);
+            let mut info = vec![1, 0, 0, 0];
+            info.extend_from_slice(&{
+                let mut n = [0u8; 32];
+                n[..NAME.len()].copy_from_slice(NAME);
+                n
+            });
+            info.extend_from_slice(&[0u8; 12]);
+            info.extend_from_slice(&MAC);
+            reg.write_all(&eemp(0x0003, &info)).unwrap();
+            drop(reg);
 
-        // auth: status byte 30, then status query, ready, stream go
-        let (mut auth, _) = control.accept().unwrap();
-        auth.set_nodelay(true).unwrap();
-        wait_cmd(&mut auth, 0x0101);
-        let mut reply = vec![0u8; 40];
-        reply[30] = status;
-        auth.write_all(&eemp(0x0102, &reply)).unwrap();
-        if status != 0 {
-            return;
-        }
-        thread::sleep(Duration::from_millis(300));
-        auth.write_all(&eemp(0x010E, &[])).unwrap();
-        assert!(wait_cmd(&mut auth, 0x0108), "client answers status query");
-        auth.write_all(&eemp(0x0110, &[])).unwrap();
-        thread::sleep(Duration::from_millis(800));
-        auth.write_all(&eemp(0x0016, &[])).unwrap();
-        if wait_cmd(&mut auth, 0x0104) {
-            s.lock().unwrap().goodbye = true;
-            let _ = auth.write_all(&eemp(0x0105, &[]));
+            // auth: status byte 30, then status query, ready, stream go
+            let (mut auth, _) = control.accept().unwrap();
+            auth.set_nodelay(true).unwrap();
+            wait_cmd(&mut auth, 0x0101);
+            let mut reply = vec![0u8; 40];
+            reply[30] = status;
+            auth.write_all(&eemp(0x0102, &reply)).unwrap();
+            if status != 0 {
+                continue;
+            }
+            thread::sleep(Duration::from_millis(300));
+            auth.write_all(&eemp(0x010E, &[])).unwrap();
+            assert!(wait_cmd(&mut auth, 0x0108), "client answers status query");
+            auth.write_all(&eemp(0x0110, &[])).unwrap();
+            thread::sleep(Duration::from_millis(800));
+            auth.write_all(&eemp(0x0016, &[])).unwrap();
+            s.lock().unwrap().streams += 1;
+            if !last {
+                thread::sleep(Duration::from_secs(1));
+                continue; // auth drops here
+            }
+            if wait_cmd(&mut auth, 0x0104) {
+                s.lock().unwrap().goodbye = true;
+                let _ = auth.write_all(&eemp(0x0105, &[]));
+            }
         }
     });
 
     let s = seen.clone();
     thread::spawn(move || {
-        for _ in 0..2 {
+        for _ in 0..2 * accepted {
             let Ok((mut c, _)) = video.accept() else { return };
             let mut init = [0u8; 36];
             c.read_exact(&mut init).unwrap();
@@ -183,7 +196,7 @@ fn blocks(stream: &[u8]) -> Vec<(bool, u32, u32)> {
 #[test]
 fn fake_projector_session() {
     // accept: stream starts whole, then small parts, then goodbye
-    let seen = fake_projector(0);
+    let seen = fake_projector(&[0]);
     let running = Arc::new(AtomicBool::new(true));
     let r = running.clone();
     let caster = thread::spawn(move || {
@@ -213,9 +226,34 @@ fn fake_projector_session() {
     drop(seen);
 
     // refuse: stops at once with rejected kind
-    let _seen = fake_projector(1);
+    let _seen = fake_projector(&[1]);
     let running = AtomicBool::new(true);
     let opts = CastOptions { projector_ip: Some(LOCAL), give_up_after: Some(3), ..Default::default() };
     let err = run_with(&opts, &mut MovingSquare(0), &running, &mut |_| {}).unwrap_err();
     assert_eq!(err.kind, FailKind::Rejected);
+    thread::sleep(Duration::from_millis(300));
+
+    // drop mid-cast, refused while projector still holds old session, then back: keeps casting, no error
+    let seen = fake_projector(&[0, 1, 0]);
+    let running = Arc::new(AtomicBool::new(true));
+    let r = running.clone();
+    let caster = thread::spawn(move || {
+        let opts = CastOptions { projector_ip: Some(LOCAL), ..Default::default() };
+        let mut events = Vec::new();
+        let result = run_with(&opts, &mut MovingSquare(0), &r, &mut |e| events.push(e));
+        (result, events)
+    });
+    let start = Instant::now();
+    let casting = CastEvent::Casting { projector: "MOCKPROJ".into() };
+    while seen.lock().unwrap().streams < 2 && !caster.is_finished() {
+        assert!(start.elapsed() < Duration::from_secs(40), "never recovered");
+        thread::sleep(Duration::from_millis(100));
+    }
+    thread::sleep(Duration::from_millis(500));
+    running.store(false, Ordering::Relaxed);
+    let (result, events) = caster.join().unwrap();
+    assert_eq!(result, Ok(()), "refusal after a working cast must not end the cast");
+    assert_eq!(events.iter().filter(|e| **e == casting).count(), 2, "{events:?}");
+    thread::sleep(Duration::from_millis(300));
+    assert!(seen.lock().unwrap().goodbye, "second cast reached and ended cleanly");
 }
